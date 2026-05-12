@@ -76,7 +76,10 @@ func main() {
 			if err != nil {
 				return err
 			}
-			os.Stdout.Write(res)
+			_, err = os.Stdout.Write(res)
+		if err != nil {
+			return err
+		}
 			return nil
 		},
 	}

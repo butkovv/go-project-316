@@ -46,7 +46,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if err != nil {
 		return []byte{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	page := Page{
 		URL:        opts.URL,
