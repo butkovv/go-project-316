@@ -4,9 +4,10 @@ build:
 lint:
 	golangci-lint run ./...
 
+.PHONY: test
 test:
 	go mod tidy
-	go test -v ./...
+	go test -v ./... -race
 
 run:
 	./bin/hexlet-go-crawler $(URL)
