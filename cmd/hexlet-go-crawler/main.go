@@ -18,12 +18,12 @@ func main() {
 		Name:  "hexlet-go-crawler",
 		Usage: "analyze a website structure",
 		Flags: []cli.Flag{
-			&cli.Int64Flag{
+			&cli.IntFlag{
 				Name:  "depth",
 				Value: 10,
 				Usage: "crawl depth",
 			},
-			&cli.Int64Flag{
+			&cli.IntFlag{
 				Name:  "retries",
 				Value: 1,
 				Usage: "number of retries for failed requests",
@@ -38,7 +38,7 @@ func main() {
 				Value: 15 * time.Second,
 				Usage: "per-request timeout",
 			},
-			&cli.Int64Flag{
+			&cli.IntFlag{
 				Name:  "rps",
 				Value: 0,
 				Usage: "limit requests per second (overrides delay)",
@@ -47,7 +47,7 @@ func main() {
 				Name:  "user-agent",
 				Usage: "custom user agent",
 			},
-			&cli.Int64Flag{
+			&cli.IntFlag{
 				Name:  "workers",
 				Value: 4,
 				Usage: "number of concurrent workers",
@@ -63,12 +63,12 @@ func main() {
 			}
 			options := crawler.Options{
 				URL:         url,
-				Depth:       cmd.Int64("depth"),
-				Retries:     cmd.Int64("retries"),
+				Depth:       cmd.Int("depth"),
+				Retries:     cmd.Int("retries"),
 				Delay:       cmd.Duration("retries"),
 				Timeout:     cmd.Duration("timeout"),
 				UserAgent:   cmd.String("user-agent"),
-				Concurrency: cmd.Int64("workers"),
+				Concurrency: cmd.Int("workers"),
 				IndentJSON:  0,
 				HTTPClient:  client,
 			}
@@ -77,9 +77,9 @@ func main() {
 				return err
 			}
 			_, err = os.Stdout.Write(res)
-		if err != nil {
-			return err
-		}
+			if err != nil {
+				return err
+			}
 			return nil
 		},
 	}

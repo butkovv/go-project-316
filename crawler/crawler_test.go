@@ -123,6 +123,58 @@ func TestAnalyze_NetworkError(t *testing.T) {
 	}
 }
 
+func TestAnalyze_BrokenLinkDetected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><body><a href="/ok">ok</a><a href="/broken">broken</a></body></html>`))
+		case "/ok":
+			w.WriteHeader(http.StatusOK)
+		case "/broken":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Concurrency = 2
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+
+	page := report.Pages[0]
+	if page.HTTPStatus != 200 {
+		t.Errorf("Page HTTPStatus = %d, want 200", page.HTTPStatus)
+	}
+
+	if len(page.BrokenLinks) != 1 {
+		t.Fatalf("BrokenLinks length = %d, want 1", len(page.BrokenLinks))
+	}
+
+	bl := page.BrokenLinks[0]
+	if bl.URL != server.URL+"/broken" {
+		t.Errorf("BrokenLink URL = %q, want %q", bl.URL, server.URL+"/broken")
+	}
+	if bl.StatusCode != 404 {
+		t.Errorf("BrokenLink StatusCode = %d, want 404", bl.StatusCode)
+	}
+}
+
 func TestAnalyze_InvalidURL(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 
