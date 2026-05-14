@@ -175,6 +175,140 @@ func TestAnalyze_BrokenLinkDetected(t *testing.T) {
 	}
 }
 
+func TestAnalyze_SEOElementsPresent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`
+			<html>
+				<head>
+					<title>Fish &amp; Chips</title>
+					<meta name="description" content="Fresh &amp; tasty seafood">
+				</head>
+				<body>
+					<h1>Main Heading</h1>
+				</body>
+			</html>
+		`))
+	}))
+	defer server.Close()
+
+	result, err := Analyze(context.Background(), baseOpts(server.URL, server.Client()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+
+	seo := report.Pages[0].SEO
+	if !seo.HasTitle {
+		t.Error("SEO.HasTitle = false, want true")
+	}
+	if seo.Title != "Fish & Chips" {
+		t.Errorf("SEO.Title = %q, want %q", seo.Title, "Fish & Chips")
+	}
+	if !seo.HasDescription {
+		t.Error("SEO.HasDescription = false, want true")
+	}
+	if seo.Description != "Fresh & tasty seafood" {
+		t.Errorf("SEO.Description = %q, want %q", seo.Description, "Fresh & tasty seafood")
+	}
+	if !seo.HasH1 {
+		t.Error("SEO.HasH1 = false, want true")
+	}
+}
+
+func TestAnalyze_SEOElementsAbsent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html><head></head><body><p>No SEO here</p></body></html>`))
+	}))
+	defer server.Close()
+
+	result, err := Analyze(context.Background(), baseOpts(server.URL, server.Client()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+
+	seo := report.Pages[0].SEO
+	if seo.HasTitle {
+		t.Error("SEO.HasTitle = true, want false")
+	}
+	if seo.Title != "" {
+		t.Errorf("SEO.Title = %q, want empty", seo.Title)
+	}
+	if seo.HasDescription {
+		t.Error("SEO.HasDescription = true, want false")
+	}
+	if seo.Description != "" {
+		t.Errorf("SEO.Description = %q, want empty", seo.Description)
+	}
+	if seo.HasH1 {
+		t.Error("SEO.HasH1 = true, want false")
+	}
+}
+
+func TestAnalyze_SEOTextIsCleaned(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`
+			<html>
+				<head>
+					<title>
+						Fish   &amp;
+						Chips
+					</title>
+					<meta name="description" content=" Fresh   &amp; tasty   seafood ">
+				</head>
+				<body>
+					<h1>Main Heading</h1>
+				</body>
+			</html>
+		`))
+	}))
+	defer server.Close()
+
+	result, err := Analyze(context.Background(), baseOpts(server.URL, server.Client()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+
+	seo := report.Pages[0].SEO
+	if seo.Title != "Fish & Chips" {
+		t.Errorf("SEO.Title = %q, want %q", seo.Title, "Fish & Chips")
+	}
+	if seo.Description != "Fresh & tasty seafood" {
+		t.Errorf("SEO.Description = %q, want %q", seo.Description, "Fresh & tasty seafood")
+	}
+}
+
 func TestAnalyze_InvalidURL(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 

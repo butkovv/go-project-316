@@ -1,8 +1,10 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +32,14 @@ type Link struct {
 	Depth int
 }
 
+type SEO struct {
+	HasTitle       bool   `json:"has_title"`
+	Title          string `json:"title"`
+	HasDescription bool   `json:"has_description"`
+	Description    string `json:"description"`
+	HasH1          bool   `json:"has_h1"`
+}
+
 type BrokenLink struct {
 	URL        string `json:"url"`
 	StatusCode int    `json:"status_code"`
@@ -43,6 +53,7 @@ type Page struct {
 	Status       string       `json:"status"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
+	SEO          SEO          `json:"seo"`
 }
 
 type Report struct {
@@ -70,10 +81,11 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, maxDepth int, li
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	doc, err := html.Parse(response.Body)
+	bodyBytes, err := io.ReadAll(response.Body)
 	if err != nil {
 		return Page{}, nil, err
 	}
+	seo := c.getSEO(bodyBytes)
 
 	page := Page{
 		URL:          link.URL,
@@ -81,8 +93,10 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, maxDepth int, li
 		HTTPStatus:   response.StatusCode,
 		Status:       response.Status,
 		DiscoveredAt: time.Now(),
+		SEO:          seo,
 	}
 
+	doc, err := html.Parse(bytes.NewReader(bodyBytes))
 	foundLinks := c.findLinks(doc, link.Depth+1, nil, link.URL)
 
 	for _, l := range foundLinks {
@@ -100,6 +114,11 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, maxDepth int, li
 }
 
 func (c *Crawler) findLinks(n *html.Node, depth int, links []Link, baseUrl string) []Link {
+	baseParsed, err := url.Parse(baseUrl)
+	if err != nil {
+		return links
+	}
+
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, a := range n.Attr {
 			if a.Key != "href" {
@@ -119,12 +138,7 @@ func (c *Crawler) findLinks(n *html.Node, depth int, links []Link, baseUrl strin
 			link := Link{Depth: depth}
 
 			if !u.IsAbs() {
-				base, err := url.Parse(baseUrl)
-				if err != nil {
-					continue
-				}
-
-				link.URL = base.ResolveReference(u).String()
+				link.URL = baseParsed.ResolveReference(u).String()
 			} else {
 				link.URL = a.Val
 			}
@@ -147,19 +161,6 @@ func (c *Crawler) markVisited(URL string) bool {
 	}
 	c.visited[URL] = true
 	return true
-}
-
-func getDomain(rawUrl string) (string, error) {
-	u, err := url.Parse(rawUrl)
-	if err != nil {
-		return "", err
-	}
-	h := u.Host
-	d, err := publicsuffix.EffectiveTLDPlusOne(h)
-	if err != nil {
-		return "", err
-	}
-	return d, nil
 }
 
 func (c *Crawler) checkBrokenLink(ctx context.Context, sem chan struct{}, link Link) (BrokenLink, bool) {
@@ -191,6 +192,54 @@ func (c *Crawler) doRequest(ctx context.Context, sem chan struct{}, req *http.Re
 	return response, err
 }
 
+func (c *Crawler) getSEO(bodyBytes []byte) SEO {
+	tokenizer := html.NewTokenizer(bytes.NewReader(bodyBytes))
+	seo := SEO{}
+
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			break
+		}
+
+		token := tokenizer.Token()
+		if token.Data == "meta" {
+			for _, attr := range token.Attr {
+				if attr.Key == "name" && strings.ToLower(attr.Val) == "description" {
+					seo.HasDescription = true
+				}
+				if attr.Key == "content" {
+					seo.Description = cleanText(attr.Val)
+				}
+			}
+		}
+
+		if tokenType == html.StartTagToken && (token.Data == "title") {
+			seo.HasTitle = true
+			if tokenizer.Next() == html.TextToken {
+				seo.Title = cleanText(tokenizer.Token().Data)
+			}
+		}
+		if tokenType == html.StartTagToken && (token.Data == "h1") {
+			seo.HasH1 = true
+		}
+	}
+	return seo
+}
+
+func getDomain(rawUrl string) (string, error) {
+	u, err := url.Parse(rawUrl)
+	if err != nil {
+		return "", err
+	}
+	h := u.Host
+	d, err := publicsuffix.EffectiveTLDPlusOne(h)
+	if err != nil {
+		return "", err
+	}
+	return d, nil
+}
+
 func acquire(ctx context.Context, sem chan struct{}) error {
 	select {
 	case sem <- struct{}{}:
@@ -202,6 +251,10 @@ func acquire(ctx context.Context, sem chan struct{}) error {
 
 func release(sem chan struct{}) {
 	<-sem
+}
+
+func cleanText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
