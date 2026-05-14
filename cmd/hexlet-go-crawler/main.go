@@ -65,7 +65,7 @@ func main() {
 				URL:         url,
 				Depth:       cmd.Int("depth"),
 				Retries:     cmd.Int("retries"),
-				Delay:       cmd.Duration("retries"),
+				Delay:       cmd.Duration("delay"),
 				Timeout:     cmd.Duration("timeout"),
 				UserAgent:   cmd.String("user-agent"),
 				Concurrency: cmd.Int("workers"),
