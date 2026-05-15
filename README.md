@@ -1,25 +1,59 @@
-### Hexlet tests and linter status:
+### Статус тестов и линтера Hexlet:
 [![Actions Status](https://github.com/butkovv/go-project-316/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/butkovv/go-project-316/actions)
 
-## Crawl Depth
+## Глубина обхода
 
-The `depth` setting controls how many link transitions the crawler may follow from the starting URL inside the source domain.
+Настройка `depth` определяет, сколько переходов по ссылкам краулер может выполнить от стартового URL внутри исходного домена.
 
-- The starting page always has `depth = 0`.
-- Links found on the starting page have `depth = 1`.
-- Links found on those pages have `depth = 2`, and so on.
-- When the next page depth would exceed the configured limit, the crawler does not add that page to the crawl queue.
+- Стартовая страница всегда имеет `depth = 0`.
+- Ссылки, найденные на стартовой странице, имеют `depth = 1`.
+- Ссылки, найденные на этих страницах, имеют `depth = 2`, и так далее.
+- Если глубина следующей страницы превысит заданный лимит, краулер не добавит эту страницу в очередь обхода.
 
-Examples:
+Примеры:
 
-- `--depth 0` analyzes only the starting page.
-- `--depth 1` analyzes the starting page and internal pages linked directly from it.
-- `--depth 2` also analyzes internal pages linked from depth-1 pages.
+- `--depth 0` анализирует только стартовую страницу.
+- `--depth 1` анализирует стартовую страницу и внутренние страницы, на которые она ссылается напрямую.
+- `--depth 2` дополнительно анализирует внутренние страницы, найденные на страницах с `depth = 1`.
 
-The value can be changed with the CLI flag:
+Значение можно изменить CLI-флагом:
 
 ```bash
 ./bin/hexlet-go-crawler --depth 2 https://example.com
 ```
 
-Only pages inside the original domain are crawled. Links to external domains are not added to `pages`, but they may still be checked and reported as `broken_links` when unavailable.
+Обход выполняется только для страниц внутри исходного домена. Ссылки на внешние домены не добавляются в `pages`, но могут проверяться и попадать в `broken_links`, если целевой ресурс недоступен.
+
+## Ограничение частоты запросов
+
+Краулер может ограничивать глобальную частоту HTTP-запросов для всего процесса. Ограничение применяется ко всем HTTP-запросам анализатора, включая загрузку страниц и проверку битых ссылок.
+
+Доступны два CLI-параметра:
+
+- `--delay=200ms` задает фиксированную задержку между соседними HTTP-запросами.
+- `--rps=5` задает целевую частоту запросов в запросах в секунду.
+
+Примеры:
+
+```bash
+./bin/hexlet-go-crawler --delay=200ms https://example.com
+./bin/hexlet-go-crawler --rps=5 https://example.com
+```
+
+Если указаны оба параметра, `--rps` имеет приоритет над `--delay`:
+
+```bash
+./bin/hexlet-go-crawler --delay=1s --rps=5 https://example.com
+```
+
+При использовании как библиотеки это же поведение настраивается полями `Options.Delay` и `Options.RPS`:
+
+```go
+opts := crawler.Options{
+    URL:   "https://example.com",
+    Delay: 200 * time.Millisecond,
+    RPS:   0,
+}
+```
+
+Если `Options.RPS > 0`, значение `Options.Delay` игнорируется. Если `Options.Delay` и `Options.RPS` равны нулю, ограничение частоты отключено, и запросы не замедляются искусственно.

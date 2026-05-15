@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 )
@@ -41,6 +42,52 @@ func routedClient(targets map[string]string) *http.Client {
 		Transport: rewriteTransport{targets: parsedTargets, base: http.DefaultTransport},
 		Timeout:   2 * time.Second,
 	}
+}
+
+type recordingTransport struct {
+	targets map[string]*url.URL
+	base    http.RoundTripper
+	mu      sync.Mutex
+	times   []time.Time
+}
+
+func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.times = append(t.times, time.Now())
+	t.mu.Unlock()
+
+	target, ok := t.targets[req.URL.Host]
+	if !ok {
+		return t.base.RoundTrip(req)
+	}
+
+	rewritten := req.Clone(req.Context())
+	rewritten.URL.Scheme = target.Scheme
+	rewritten.URL.Host = target.Host
+	return t.base.RoundTrip(rewritten)
+}
+
+func (t *recordingTransport) Times() []time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	times := make([]time.Time, len(t.times))
+	copy(times, t.times)
+	return times
+}
+
+func recordingRoutedClient(targets map[string]string) (*http.Client, *recordingTransport) {
+	parsedTargets := make(map[string]*url.URL, len(targets))
+	for host, target := range targets {
+		parsed, err := url.Parse(target)
+		if err != nil {
+			panic(err)
+		}
+		parsedTargets[host] = parsed
+	}
+
+	transport := &recordingTransport{targets: parsedTargets, base: http.DefaultTransport}
+	return &http.Client{Transport: transport, Timeout: 2 * time.Second}, transport
 }
 
 func baseOpts(url string, client *http.Client) Options {
@@ -523,6 +570,168 @@ func TestAnalyze_DuplicateLinksAppearOnce(t *testing.T) {
 	}
 	if len(report.Pages) != 2 {
 		t.Fatalf("Pages length = %d, want 2", len(report.Pages))
+	}
+}
+
+func TestAnalyze_DelayLimitsRequestIntervals(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><body><a href="/first">first</a><a href="/second">second</a></body></html>`))
+		case "/first", "/second":
+			_, _ = w.Write([]byte(`<html><body>ok</body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, transport := recordingRoutedClient(map[string]string{"source.com": server.URL})
+	opts := baseOpts("http://source.com", client)
+	opts.Depth = 1
+	opts.Concurrency = 4
+	opts.Delay = 40 * time.Millisecond
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 3 {
+		t.Fatalf("Pages length = %d, want 3", len(report.Pages))
+	}
+
+	times := transport.Times()
+	if len(times) < 2 {
+		t.Fatalf("recorded request count = %d, want at least 2", len(times))
+	}
+	for i := 1; i < len(times); i++ {
+		interval := times[i].Sub(times[i-1])
+		if interval < 30*time.Millisecond {
+			t.Fatalf("request interval %d = %s, want at least %s", i, interval, 30*time.Millisecond)
+		}
+	}
+}
+
+func TestAnalyze_RPSOverridesDelay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><body><a href="/first">first</a><a href="/second">second</a></body></html>`))
+		case "/first", "/second":
+			_, _ = w.Write([]byte(`<html><body>ok</body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, transport := recordingRoutedClient(map[string]string{"source.com": server.URL})
+	opts := baseOpts("http://source.com", client)
+	opts.Depth = 1
+	opts.Concurrency = 4
+	opts.Delay = 500 * time.Millisecond
+	opts.RPS = 20
+
+	started := time.Now()
+	result, err := Analyze(context.Background(), opts)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 3 {
+		t.Fatalf("Pages length = %d, want 3", len(report.Pages))
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("Analyze elapsed = %s, want less than delay %s when RPS is set", elapsed, 500*time.Millisecond)
+	}
+
+	times := transport.Times()
+	if len(times) < 2 {
+		t.Fatalf("recorded request count = %d, want at least 2", len(times))
+	}
+	for i := 1; i < len(times); i++ {
+		interval := times[i].Sub(times[i-1])
+		if interval < 30*time.Millisecond {
+			t.Fatalf("request interval %d = %s, want at least %s", i, interval, 30*time.Millisecond)
+		}
+	}
+}
+
+func TestAnalyze_NoRateLimitDoesNotDelayReport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><body><a href="/first">first</a><a href="/second">second</a></body></html>`))
+		case "/first", "/second":
+			_, _ = w.Write([]byte(`<html><body>ok</body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := routedClient(map[string]string{"source.com": server.URL})
+	opts := baseOpts("http://source.com", client)
+	opts.Depth = 1
+	opts.Concurrency = 4
+
+	started := time.Now()
+	result, err := Analyze(context.Background(), opts)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("Analyze elapsed = %s, want no artificial rate-limit delay", elapsed)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 3 {
+		t.Fatalf("Pages length = %d, want 3", len(report.Pages))
+	}
+}
+
+func TestAnalyze_ContextCancelStopsRateLimitWait(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Delay = 5 * time.Second
+
+	started := time.Now()
+	result, err := Analyze(ctx, opts)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Fatalf("Analyze elapsed = %s, want context cancellation to stop rate wait quickly", elapsed)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json after context cancellation: %v", err)
 	}
 }
 

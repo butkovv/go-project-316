@@ -20,7 +20,7 @@ type Options struct {
 	Depth       int
 	Retries     int
 	Delay       time.Duration
-	Timeout     time.Duration
+	RPS         int
 	UserAgent   string
 	Concurrency int
 	IndentJSON  int
@@ -69,13 +69,13 @@ type Crawler struct {
 	mu         sync.Mutex
 }
 
-func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, maxDepth int, link Link) (Page, []Link, error) {
+func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Ticker, maxDepth int, link Link) (Page, []Link, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
 	if err != nil {
 		return Page{}, nil, err
 	}
 
-	response, err := c.doRequest(ctx, sem, req)
+	response, err := c.doRequest(ctx, sem, ticker, req)
 	if err != nil {
 		return Page{}, nil, err
 	}
@@ -100,7 +100,7 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, maxDepth int, li
 	foundLinks := c.findLinks(doc, link.Depth+1, nil, link.URL)
 
 	for _, l := range foundLinks {
-		brokenLink, ok := c.checkBrokenLink(ctx, sem, l)
+		brokenLink, ok := c.checkBrokenLink(ctx, sem, ticker, l)
 		if ok {
 			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
@@ -163,12 +163,12 @@ func (c *Crawler) markVisited(URL string) bool {
 	return true
 }
 
-func (c *Crawler) checkBrokenLink(ctx context.Context, sem chan struct{}, link Link) (BrokenLink, bool) {
+func (c *Crawler) checkBrokenLink(ctx context.Context, sem chan struct{}, ticker *time.Ticker, link Link) (BrokenLink, bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, link.URL, nil)
 	if err != nil {
 		return BrokenLink{URL: link.URL, Error: err.Error()}, true
 	}
-	response, err := c.doRequest(ctx, sem, req)
+	response, err := c.doRequest(ctx, sem, ticker, req)
 	if err != nil {
 		return BrokenLink{URL: link.URL, Error: err.Error()}, true
 	}
@@ -179,7 +179,15 @@ func (c *Crawler) checkBrokenLink(ctx context.Context, sem chan struct{}, link L
 	return BrokenLink{}, false
 }
 
-func (c *Crawler) doRequest(ctx context.Context, sem chan struct{}, req *http.Request) (*http.Response, error) {
+func (c *Crawler) doRequest(ctx context.Context, sem chan struct{}, ticker *time.Ticker, req *http.Request) (*http.Response, error) {
+	if ticker != nil {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
 	err := acquire(ctx, sem)
 	if err != nil {
 		return nil, err
@@ -263,6 +271,17 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	pages := make(chan Page, workers)
 	sem := make(chan struct{}, workers)
 
+	var ticker *time.Ticker
+
+	switch {
+	case opts.RPS > 0:
+		ticker = time.NewTicker(time.Second / time.Duration(opts.RPS))
+		defer ticker.Stop()
+	case opts.Delay > 0:
+		ticker = time.NewTicker(opts.Delay)
+		defer ticker.Stop()
+	}
+
 	initialDomain, err := getDomain(opts.URL)
 	if err != nil {
 		return []byte{}, err
@@ -282,7 +301,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			return
 		}
 
-		page, newLinks, err := c.crawl(ctx, sem, opts.Depth, link)
+		page, newLinks, err := c.crawl(ctx, sem, ticker, opts.Depth, link)
 
 		if err != nil {
 			return
