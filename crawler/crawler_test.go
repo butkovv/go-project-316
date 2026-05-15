@@ -5,9 +5,43 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
+
+type rewriteTransport struct {
+	targets map[string]*url.URL
+	base    http.RoundTripper
+}
+
+func (t rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	target, ok := t.targets[req.URL.Host]
+	if !ok {
+		return t.base.RoundTrip(req)
+	}
+
+	rewritten := req.Clone(req.Context())
+	rewritten.URL.Scheme = target.Scheme
+	rewritten.URL.Host = target.Host
+	return t.base.RoundTrip(rewritten)
+}
+
+func routedClient(targets map[string]string) *http.Client {
+	parsedTargets := make(map[string]*url.URL, len(targets))
+	for host, target := range targets {
+		parsed, err := url.Parse(target)
+		if err != nil {
+			panic(err)
+		}
+		parsedTargets[host] = parsed
+	}
+
+	return &http.Client{
+		Transport: rewriteTransport{targets: parsedTargets, base: http.DefaultTransport},
+		Timeout:   2 * time.Second,
+	}
+}
 
 func baseOpts(url string, client *http.Client) Options {
 	return Options{
@@ -306,6 +340,189 @@ func TestAnalyze_SEOTextIsCleaned(t *testing.T) {
 	}
 	if seo.Description != "Fresh & tasty seafood" {
 		t.Errorf("SEO.Description = %q, want %q", seo.Description, "Fresh & tasty seafood")
+	}
+}
+
+func TestAnalyze_DepthLimitsTraversal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><body><a href="/child">child</a></body></html>`))
+		case "/child":
+			_, _ = w.Write([]byte(`<html><body><a href="/grandchild">grandchild</a></body></html>`))
+		case "/grandchild":
+			_, _ = w.Write([]byte(`<html><body>grandchild</body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := routedClient(map[string]string{"source.com": server.URL})
+	tests := []struct {
+		name      string
+		depth     int
+		wantDepth map[string]int
+	}{
+		{
+			name:  "depth zero includes only root",
+			depth: 0,
+			wantDepth: map[string]int{
+				"http://source.com": 0,
+			},
+		},
+		{
+			name:  "depth one includes one transition",
+			depth: 1,
+			wantDepth: map[string]int{
+				"http://source.com":        0,
+				"http://source.com/child": 1,
+			},
+		},
+		{
+			name:  "depth two includes two transitions",
+			depth: 2,
+			wantDepth: map[string]int{
+				"http://source.com":             0,
+				"http://source.com/child":      1,
+				"http://source.com/grandchild": 2,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := baseOpts("http://source.com", client)
+			opts.Depth = tt.depth
+
+			result, err := Analyze(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var report Report
+			if err := json.Unmarshal(result, &report); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+
+			if len(report.Pages) != len(tt.wantDepth) {
+				t.Fatalf("Pages length = %d, want %d", len(report.Pages), len(tt.wantDepth))
+			}
+
+			for _, page := range report.Pages {
+				want, ok := tt.wantDepth[page.URL]
+				if !ok {
+					t.Fatalf("unexpected page in report: %s", page.URL)
+				}
+				if page.Depth != want {
+					t.Errorf("Page %s depth = %d, want %d", page.URL, page.Depth, want)
+				}
+			}
+		})
+	}
+}
+
+func TestAnalyze_ExternalLinksAreNotCrawled(t *testing.T) {
+	sourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`
+				<html><body>
+					<a href="/first">first</a>
+					<a href="/second">second</a>
+					<a href="http://external.com/outside">external</a>
+				</body></html>`))
+		case "/first", "/second":
+			_, _ = w.Write([]byte(`<html><body>internal</body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer sourceServer.Close()
+
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer externalServer.Close()
+
+	client := routedClient(map[string]string{
+		"source.com":   sourceServer.URL,
+		"external.com": externalServer.URL,
+	})
+	opts := baseOpts("http://source.com", client)
+	opts.Depth = 1
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	wantPages := map[string]bool{
+		"http://source.com":         true,
+		"http://source.com/first":  true,
+		"http://source.com/second": true,
+	}
+	if len(report.Pages) != len(wantPages) {
+		t.Fatalf("Pages length = %d, want %d", len(report.Pages), len(wantPages))
+	}
+	for _, page := range report.Pages {
+		if !wantPages[page.URL] {
+			t.Fatalf("unexpected page in report: %s", page.URL)
+		}
+		if page.URL == "http://external.com/outside" {
+			t.Fatal("external page appeared in report pages")
+		}
+	}
+}
+
+func TestAnalyze_DuplicateLinksAppearOnce(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><body><a href="/same">same</a><a href="/same">same again</a></body></html>`))
+		case "/same":
+			_, _ = w.Write([]byte(`<html><body>same</body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := routedClient(map[string]string{"source.com": server.URL})
+	opts := baseOpts("http://source.com", client)
+	opts.Depth = 1
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	counts := map[string]int{}
+	for _, page := range report.Pages {
+		counts[page.URL]++
+	}
+
+	if counts["http://source.com"] != 1 {
+		t.Errorf("root page count = %d, want 1", counts["http://source.com"])
+	}
+	if counts["http://source.com/same"] != 1 {
+		t.Errorf("duplicate target page count = %d, want 1", counts["http://source.com/same"])
+	}
+	if len(report.Pages) != 2 {
+		t.Fatalf("Pages length = %d, want 2", len(report.Pages))
 	}
 }
 
