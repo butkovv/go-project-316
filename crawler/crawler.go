@@ -104,6 +104,10 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 	}
 
 	doc, err := html.Parse(bytes.NewReader(bodyBytes))
+	if err != nil {
+		return Page{}, nil, err
+	}
+
 	foundLinks := c.findLinks(doc, link.Depth+1, nil, link.URL)
 
 	for _, l := range foundLinks {
@@ -392,7 +396,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil || (resp != nil && (resp.StatusCode == 429 || resp.StatusCode >= 500)) {
 			if attempt < maxAttempts-1 {
 				if resp != nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 				}
 				continue
 			}
