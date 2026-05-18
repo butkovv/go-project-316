@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -67,6 +68,12 @@ type Crawler struct {
 	visited    map[string]bool
 	httpclient *http.Client
 	mu         sync.Mutex
+}
+
+type RetryTransport struct {
+	Next       http.RoundTripper
+	MaxRetries int
+	BaseDelay  time.Duration
 }
 
 func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Ticker, maxDepth int, link Link) (Page, []Link, error) {
@@ -288,8 +295,19 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}
 
 	var wg sync.WaitGroup
+
+	hc := *opts.HTTPClient
+	baseTransport := opts.HTTPClient.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	hc.Transport = &RetryTransport{
+		Next:       baseTransport,
+		MaxRetries: opts.Retries,
+		BaseDelay:  max(100*time.Millisecond, opts.Delay),
+	}
 	c := &Crawler{
-		httpclient: opts.HTTPClient,
+		httpclient: &hc,
 		visited:    make(map[string]bool),
 	}
 
@@ -351,4 +369,35 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return []byte{}, err
 	}
 	return json, nil
+}
+
+func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+	maxAttempts := max(t.MaxRetries, 0) + 1
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(math.Pow(2, float64(attempt))) * t.BaseDelay
+
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(delay):
+			}
+		}
+
+		resp, err := t.Next.RoundTrip(req)
+
+		if err != nil || (resp != nil && (resp.StatusCode == 429 || resp.StatusCode >= 500)) {
+			if attempt < maxAttempts-1 {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				continue
+			}
+		}
+		return resp, err
+	}
+	return resp, err
 }

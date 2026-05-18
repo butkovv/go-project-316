@@ -186,9 +186,17 @@ func TestAnalyze_Timeout(t *testing.T) {
 
 	client := &http.Client{Timeout: 50 * time.Millisecond}
 
-	_, err := Analyze(context.Background(), baseOpts(server.URL, client))
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
+	result, err := Analyze(context.Background(), baseOpts(server.URL, client))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 0 {
+		t.Fatalf("Pages length = %d, want 0", len(report.Pages))
 	}
 }
 
@@ -198,9 +206,17 @@ func TestAnalyze_NetworkError(t *testing.T) {
 	}))
 	server.Close()
 
-	_, err := Analyze(context.Background(), baseOpts(server.URL, server.Client()))
-	if err == nil {
-		t.Fatal("expected network error, got nil")
+	result, err := Analyze(context.Background(), baseOpts(server.URL, server.Client()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 0 {
+		t.Fatalf("Pages length = %d, want 0", len(report.Pages))
 	}
 }
 
@@ -735,11 +751,280 @@ func TestAnalyze_ContextCancelStopsRateLimitWait(t *testing.T) {
 	}
 }
 
+func TestAnalyze_RetriesFinalFailureReportedInBrokenLinks(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	statuses := []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusInternalServerError}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><a href="/flaky">flaky</a></body></html>`))
+		case r.URL.Path == "/flaky" && r.Method == http.MethodHead:
+			mu.Lock()
+			status := statuses[requests]
+			requests++
+			mu.Unlock()
+			w.WriteHeader(status)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Retries = 2
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+
+	brokenLinks := report.Pages[0].BrokenLinks
+	if len(brokenLinks) != 1 {
+		t.Fatalf("BrokenLinks length = %d, want 1", len(brokenLinks))
+	}
+	if brokenLinks[0].StatusCode != http.StatusInternalServerError {
+		t.Errorf("final broken link status = %d, want %d", brokenLinks[0].StatusCode, http.StatusInternalServerError)
+	}
+	if requests != 3 {
+		t.Fatalf("HEAD request count = %d, want 3", requests)
+	}
+}
+
+func TestAnalyze_RetriesStopAfterSuccess(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	statuses := []int{http.StatusInternalServerError, http.StatusOK}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><a href="/flaky">flaky</a></body></html>`))
+		case r.URL.Path == "/flaky" && r.Method == http.MethodHead:
+			mu.Lock()
+			status := statuses[requests]
+			requests++
+			mu.Unlock()
+			w.WriteHeader(status)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Retries = 2
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+	if len(report.Pages[0].BrokenLinks) != 0 {
+		t.Fatalf("BrokenLinks length = %d, want 0", len(report.Pages[0].BrokenLinks))
+	}
+	if requests != 2 {
+		t.Fatalf("HEAD request count = %d, want 2", requests)
+	}
+}
+
+func TestAnalyze_RetriesDoNotExceedLimit(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><a href="/flaky">flaky</a></body></html>`))
+		case r.URL.Path == "/flaky" && r.Method == http.MethodHead:
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Retries = 2
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if requests > opts.Retries+1 {
+		t.Fatalf("HEAD request count = %d, want at most %d", requests, opts.Retries+1)
+	}
+}
+
+func TestAnalyze_RetriesSkipPermanent404(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><a href="/missing">missing</a></body></html>`))
+		case r.URL.Path == "/missing" && r.Method == http.MethodHead:
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Retries = 2
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("HEAD request count = %d, want 1", requests)
+	}
+	if len(report.Pages[0].BrokenLinks) != 1 {
+		t.Fatalf("BrokenLinks length = %d, want 1", len(report.Pages[0].BrokenLinks))
+	}
+	if report.Pages[0].BrokenLinks[0].StatusCode != http.StatusNotFound {
+		t.Errorf("BrokenLink status = %d, want %d", report.Pages[0].BrokenLinks[0].StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestAnalyze_RetriesTemporary429(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	statuses := []int{http.StatusTooManyRequests, http.StatusOK}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><a href="/limited">limited</a></body></html>`))
+		case r.URL.Path == "/limited" && r.Method == http.MethodHead:
+			mu.Lock()
+			status := statuses[requests]
+			requests++
+			mu.Unlock()
+			w.WriteHeader(status)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Retries = 2
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("HEAD request count = %d, want 2", requests)
+	}
+	if len(report.Pages[0].BrokenLinks) != 0 {
+		t.Fatalf("BrokenLinks length = %d, want 0", len(report.Pages[0].BrokenLinks))
+	}
+}
+
+func TestAnalyze_RetryContextCancelStopsAttempts(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	ctx, cancel := context.WithCancel(context.Background())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body><a href="/flaky">flaky</a></body></html>`))
+		case r.URL.Path == "/flaky" && r.Method == http.MethodHead:
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			cancel()
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	opts := baseOpts(server.URL, server.Client())
+	opts.Retries = 2
+
+	started := time.Now()
+	result, err := Analyze(ctx, opts)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Fatalf("Analyze elapsed = %s, want retry cancellation to stop quickly", elapsed)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("HEAD request count = %d, want 1", requests)
+	}
+}
+
 func TestAnalyze_InvalidURL(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	_, err := Analyze(context.Background(), baseOpts("http://invalid-host.local", client))
-	if err == nil {
-		t.Fatal("expected error for invalid URL, got nil")
+	result, err := Analyze(context.Background(), baseOpts("http://invalid-host.local", client))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var report Report
+	if err := json.Unmarshal(result, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(report.Pages) != 0 {
+		t.Fatalf("Pages length = %d, want 0", len(report.Pages))
 	}
 }
