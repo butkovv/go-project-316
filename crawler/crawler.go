@@ -81,7 +81,7 @@ type Page struct {
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	Error        string       `json:"error"`
+	Error        string       `json:"error,omitempty"`
 	SEO          SEO          `json:"seo"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	Assets       []Asset      `json:"assets"`
@@ -222,9 +222,9 @@ func (c *Crawler) findLinks(n *html.Node, depth int, links []Link, baseUrl strin
 			link := Link{Depth: depth}
 
 			if !u.IsAbs() {
-				link.URL = baseParsed.ResolveReference(u).String()
+				link.URL = canonicalURL(baseParsed.ResolveReference(u).String())
 			} else {
-				link.URL = a.Val
+				link.URL = canonicalURL(a.Val)
 			}
 			links = append(links, link)
 		}
@@ -286,6 +286,7 @@ func (c *Crawler) findAssetLinks(n *html.Node, assetLinks []AssetLink, baseUrl s
 }
 
 func (c *Crawler) markVisited(URL string) bool {
+	URL = canonicalURL(URL)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.visited[URL] {
@@ -466,7 +467,22 @@ func pageStatus(code int) string {
 	return "error"
 }
 
+func canonicalURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	if u.Path == "/" && u.RawQuery == "" && u.Fragment == "" {
+		u.Path = ""
+	}
+
+	return u.String()
+}
+
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
+	rootURL := canonicalURL(opts.URL)
+
 	workers := max(opts.Concurrency, 1)
 
 	pages := make(chan Page, workers)
@@ -483,7 +499,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		defer ticker.Stop()
 	}
 
-	initialDomain, err := getDomain(opts.URL)
+	initialDomain, err := getDomain(rootURL)
 	if err != nil {
 		return []byte{}, err
 	}
@@ -519,7 +535,15 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		page, newLinks, err := c.crawl(ctx, sem, ticker, opts.Depth, link)
 
 		if err != nil {
-			return
+			page = Page{
+				URL:          link.URL,
+				Depth:        link.Depth,
+				Status:       "error",
+				Error:        err.Error(),
+				BrokenLinks:  []BrokenLink{},
+				Assets:       []Asset{},
+				DiscoveredAt: time.Now(),
+			}
 		}
 
 		select {
@@ -543,7 +567,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}
 
 	wg.Add(1)
-	go crawl(Link{URL: opts.URL, Depth: 0})
+	go crawl(Link{URL: rootURL, Depth: 0})
 
 	go func() {
 		wg.Wait()
@@ -551,7 +575,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}()
 
 	report := Report{
-		RootURL:     opts.URL,
+		RootURL:     rootURL,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now(),
 		Pages:       []Page{},
