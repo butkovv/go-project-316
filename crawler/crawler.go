@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,7 @@ type Asset struct {
 	Type       AssetType `json:"type"`
 	StatusCode int       `json:"status_code"`
 	SizeBytes  int64     `json:"size_bytes"`
-	Error      string    `json:"error"`
+	Error      string    `json:"error,omitempty"`
 }
 
 type AssetsCache struct {
@@ -185,6 +186,9 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 	}
 
 	assetLinks := c.findAssetLinks(doc, []AssetLink{}, link.URL)
+	sort.SliceStable(assetLinks, func(i, j int) bool {
+		return assetTypeRank(assetLinks[i].Type) < assetTypeRank(assetLinks[j].Type)
+	})
 	for _, assetLink := range assetLinks {
 		asset := c.assetsCache.GetOrFetchAsset(ctx, sem, ticker, assetLink, c.fetchAsset)
 		page.Assets = append(page.Assets, asset)
@@ -467,6 +471,19 @@ func pageStatus(code int) string {
 	return "error"
 }
 
+func assetTypeRank(t AssetType) int {
+	switch t {
+	case AssetTypeImage:
+		return 0
+	case AssetTypeScript:
+		return 1
+	case AssetTypeStyle:
+		return 2
+	default:
+		return 3
+	}
+}
+
 func canonicalURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -540,8 +557,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				Depth:        link.Depth,
 				Status:       "error",
 				Error:        err.Error(),
-				BrokenLinks:  []BrokenLink{},
-				Assets:       []Asset{},
 				DiscoveredAt: time.Now(),
 			}
 		}
@@ -584,6 +599,18 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	for p := range pages {
 		report.Pages = append(report.Pages, p)
 	}
+	sort.SliceStable(report.Pages, func(i, j int) bool {
+		if report.Pages[i].Depth != report.Pages[j].Depth {
+			return report.Pages[i].Depth < report.Pages[j].Depth
+		}
+		if report.Pages[i].URL == rootURL {
+			return true
+		}
+		if report.Pages[j].URL == rootURL {
+			return false
+		}
+		return report.Pages[i].URL < report.Pages[j].URL
+	})
 
 	var output []byte
 

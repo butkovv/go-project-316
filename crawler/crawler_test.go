@@ -177,7 +177,7 @@ func TestAnalyze_JSONMatchesGoldenReport(t *testing.T) {
 	}
 
 	got := string(normalizeReportJSON(t, result))
-	want := `{"root_url":"https://example.com","depth":1,"generated_at":"2024-06-01T12:34:56Z","pages":[{"url":"https://example.com","depth":0,"http_status":200,"status":"ok","error":"","seo":{"has_title":true,"title":"Example title","has_description":true,"description":"Example description","has_h1":true},"broken_links":[{"url":"https://example.com/missing","status_code":404,"error":"Not Found"}],"assets":[{"url":"https://example.com/static/logo.png","type":"image","status_code":200,"size_bytes":12345,"error":""}],"discovered_at":"2024-06-01T12:34:56Z"}]}`
+	want := `{"root_url":"https://example.com","depth":1,"generated_at":"2024-06-01T12:34:56Z","pages":[{"url":"https://example.com","depth":0,"http_status":200,"status":"ok","seo":{"has_title":true,"title":"Example title","has_description":true,"description":"Example description","has_h1":true},"broken_links":[{"url":"https://example.com/missing","status_code":404,"error":"Not Found"}],"assets":[{"url":"https://example.com/static/logo.png","type":"image","status_code":200,"size_bytes":12345}],"discovered_at":"2024-06-01T12:34:56Z"}]}`
 	if got != want {
 		t.Fatalf("JSON report mismatch\ngot:  %s\nwant: %s", got, want)
 	}
@@ -310,8 +310,11 @@ func TestAnalyze_Timeout(t *testing.T) {
 	if err := json.Unmarshal(result, &report); err != nil {
 		t.Fatalf("invalid json: %v", err)
 	}
-	if len(report.Pages) != 0 {
-		t.Fatalf("Pages length = %d, want 0", len(report.Pages))
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+	if report.Pages[0].Status != "error" {
+		t.Fatalf("Page status = %q, want error", report.Pages[0].Status)
 	}
 }
 
@@ -330,8 +333,11 @@ func TestAnalyze_NetworkError(t *testing.T) {
 	if err := json.Unmarshal(result, &report); err != nil {
 		t.Fatalf("invalid json: %v", err)
 	}
-	if len(report.Pages) != 0 {
-		t.Fatalf("Pages length = %d, want 0", len(report.Pages))
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+	if report.Pages[0].Status != "error" {
+		t.Fatalf("Page status = %q, want error", report.Pages[0].Status)
 	}
 }
 
@@ -1304,7 +1310,10 @@ func TestAnalyze_InvalidURL(t *testing.T) {
 	if err := json.Unmarshal(result, &report); err != nil {
 		t.Fatalf("invalid json: %v", err)
 	}
-	if len(report.Pages) != 0 {
-		t.Fatalf("Pages length = %d, want 0", len(report.Pages))
+	if len(report.Pages) != 1 {
+		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
+	}
+	if report.Pages[0].Status != "error" {
+		t.Fatalf("Page status = %q, want error", report.Pages[0].Status)
 	}
 }
