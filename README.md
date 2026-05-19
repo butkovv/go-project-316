@@ -1,6 +1,66 @@
 ### Статус тестов и линтера Hexlet:
 [![Actions Status](https://github.com/butkovv/go-project-316/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/butkovv/go-project-316/actions)
 
+## Формат отчета
+
+Краулер возвращает JSON-отчет со сводной информацией о запуске и массивом найденных страниц:
+
+```json
+{
+  "root_url": "https://example.com",
+  "depth": 1,
+  "generated_at": "2024-06-01T12:34:56Z",
+  "pages": [
+    {
+      "url": "https://example.com",
+      "depth": 0,
+      "http_status": 200,
+      "status": "ok",
+      "error": "",
+      "seo": {
+        "has_title": true,
+        "title": "Example title",
+        "has_description": true,
+        "description": "Example description",
+        "has_h1": true
+      },
+      "broken_links": [
+        {
+          "url": "https://example.com/missing",
+          "status_code": 404,
+          "error": "Not Found"
+        }
+      ],
+      "assets": [
+        {
+          "url": "https://example.com/static/logo.png",
+          "type": "image",
+          "status_code": 200,
+          "size_bytes": 12345,
+          "error": ""
+        }
+      ],
+      "discovered_at": "2024-06-01T12:34:56Z"
+    }
+  ]
+}
+```
+
+- `root_url` — стартовый URL анализа.
+- `depth` — максимальная глубина обхода, заданная пользователем.
+- `generated_at` — время формирования отчета в формате ISO8601.
+- `pages` — массив страниц, попавших в отчет.
+- `url` — абсолютный URL страницы.
+- `http_status` — HTTP-код ответа страницы.
+- `status` — краткий статус страницы: `ok` для успешных ответов и `error` для ошибок.
+- `error` — сообщение об ошибке; пустая строка означает отсутствие ошибки.
+- `seo` — наличие и значения основных SEO-элементов страницы.
+- `broken_links` — массив ссылок, которые вернули ошибочный HTTP-код или не открылись.
+- `assets` — массив найденных ресурсов страницы: изображений, скриптов и стилей.
+- `discovered_at` — время обнаружения страницы в формате ISO8601.
+
+Все ключи присутствуют в JSON всегда. Пустые значения передаются как пустые строки или пустые массивы.
+
 ## Глубина обхода
 
 Настройка `depth` определяет, сколько переходов по ссылкам краулер может выполнить от стартового URL внутри исходного домена.

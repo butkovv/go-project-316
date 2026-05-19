@@ -24,7 +24,7 @@ type Options struct {
 	RPS         int
 	UserAgent   string
 	Concurrency int
-	IndentJSON  int
+	IndentJSON  bool
 	HTTPClient  *http.Client
 }
 
@@ -80,10 +80,11 @@ type Page struct {
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	BrokenLinks  []BrokenLink `json:"broken_links"`
-	DiscoveredAt time.Time    `json:"discovered_at"`
+	Error        string       `json:"error"`
 	SEO          SEO          `json:"seo"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
 	AssetsInfo   []AssetInfo  `json:"assets"`
+	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
 type Report struct {
@@ -161,9 +162,11 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 		URL:          link.URL,
 		Depth:        link.Depth,
 		HTTPStatus:   response.StatusCode,
-		Status:       response.Status,
-		DiscoveredAt: time.Now(),
+		Status:       pageStatus(response.StatusCode),
 		SEO:          seo,
+		BrokenLinks:  []BrokenLink{},
+		AssetsInfo:   []AssetInfo{},
+		DiscoveredAt: time.Now(),
 	}
 
 	doc, err := html.Parse(bytes.NewReader(bodyBytes))
@@ -302,7 +305,7 @@ func (c *Crawler) checkBrokenLink(ctx context.Context, sem chan struct{}, ticker
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode >= http.StatusBadRequest {
-		return BrokenLink{URL: link.URL, StatusCode: response.StatusCode}, true
+		return BrokenLink{URL: link.URL, StatusCode: response.StatusCode, Error: http.StatusText(response.StatusCode)}, true
 	}
 	return BrokenLink{}, false
 }
@@ -455,6 +458,13 @@ func getAttr(n *html.Node, key string) string {
 	return ""
 }
 
+func pageStatus(code int) string {
+	if code >= 200 && code < 300 {
+		return "ok"
+	}
+	return "error"
+}
+
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	workers := max(opts.Concurrency, 1)
 
@@ -550,11 +560,18 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		report.Pages = append(report.Pages, p)
 	}
 
-	json, err := json.MarshalIndent(report, "", "  ")
+	var output []byte
+
+	if opts.IndentJSON {
+		output, err = json.MarshalIndent(report, "", "  ")
+	} else {
+		output, err = json.Marshal(report)
+	}
+
 	if err != nil {
 		return []byte{}, err
 	}
-	return json, nil
+	return output, nil
 }
 
 func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {

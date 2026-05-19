@@ -52,6 +52,11 @@ func main() {
 				Value: 4,
 				Usage: "number of concurrent workers",
 			},
+			&cli.BoolFlag{
+				Name:  "indent-json",
+				Value: false,
+				Usage: "indent resulting JSON",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			url := cmd.Args().Get(0)
@@ -69,7 +74,7 @@ func main() {
 				RPS:         cmd.Int("rps"),
 				UserAgent:   cmd.String("user-agent"),
 				Concurrency: cmd.Int("workers"),
-				IndentJSON:  0,
+				IndentJSON:  cmd.Bool("indent-json"),
 				HTTPClient:  client,
 			}
 			res, err := crawler.Analyze(ctx, options)

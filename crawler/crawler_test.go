@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -97,6 +98,120 @@ func baseOpts(url string, client *http.Client) Options {
 	}
 }
 
+func normalizeReportJSON(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	fixedTime := time.Date(2024, 6, 1, 12, 34, 56, 0, time.UTC)
+	var report Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	report.RootURL = "https://example.com"
+	report.GeneratedAt = fixedTime
+	for i := range report.Pages {
+		report.Pages[i].URL = "https://example.com"
+		report.Pages[i].DiscoveredAt = fixedTime
+		for j := range report.Pages[i].BrokenLinks {
+			report.Pages[i].BrokenLinks[j].URL = "https://example.com/missing"
+		}
+		for j := range report.Pages[i].AssetsInfo {
+			report.Pages[i].AssetsInfo[j].URL = "https://example.com/static/logo.png"
+		}
+	}
+
+	normalized, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal normalized report: %v", err)
+	}
+	return normalized
+}
+
+func goldenReportServer(t *testing.T) (*httptest.Server, *http.Client) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`
+				<html>
+					<head>
+						<title>Example title</title>
+						<meta name="description" content="Example description">
+					</head>
+					<body>
+						<h1>Heading</h1>
+						<a href="http://external.com/missing">missing</a>
+						<img src="/static/logo.png">
+					</body>
+				</html>`))
+		case "/missing":
+			w.WriteHeader(http.StatusNotFound)
+		case "/static/logo.png":
+			w.Header().Set("Content-Length", "12345")
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	client := routedClient(map[string]string{
+		"source.com":   server.URL,
+		"external.com": server.URL,
+	})
+
+	return server, client
+}
+
+func TestAnalyze_JSONMatchesGoldenReport(t *testing.T) {
+	server, client := goldenReportServer(t)
+	defer server.Close()
+
+	opts := baseOpts("http://source.com", client)
+	opts.Depth = 1
+
+	result, err := Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := string(normalizeReportJSON(t, result))
+	want := `{"root_url":"https://example.com","depth":1,"generated_at":"2024-06-01T12:34:56Z","pages":[{"url":"https://example.com","depth":0,"http_status":200,"status":"ok","error":"","seo":{"has_title":true,"title":"Example title","has_description":true,"description":"Example description","has_h1":true},"broken_links":[{"url":"https://example.com/missing","status_code":404,"error":"Not Found"}],"assets":[{"url":"https://example.com/static/logo.png","type":"image","status_code":200,"size_bytes":12345,"error":""}],"discovered_at":"2024-06-01T12:34:56Z"}]}`
+	if got != want {
+		t.Fatalf("JSON report mismatch\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
+func TestAnalyze_IndentJSONChangesOnlyFormatting(t *testing.T) {
+	server, client := goldenReportServer(t)
+	defer server.Close()
+
+	compactOpts := baseOpts("http://source.com", client)
+	compactOpts.Depth = 1
+	compact, err := Analyze(context.Background(), compactOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	indentedOpts := compactOpts
+	indentedOpts.IndentJSON = true
+	indented, err := Analyze(context.Background(), indentedOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !bytes.Contains(indented, []byte("\n  \"")) {
+		t.Fatalf("indented JSON has no expected indentation: %s", indented)
+	}
+	if bytes.Contains(compact, []byte("\n")) {
+		t.Fatalf("compact JSON contains newline: %s", compact)
+	}
+	if !bytes.Equal(normalizeReportJSON(t, compact), normalizeReportJSON(t, indented)) {
+		t.Fatalf("IndentJSON changed report content\ncompact:  %s\nindented: %s", compact, indented)
+	}
+}
+
 func TestAnalyze_Success200(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -151,8 +266,8 @@ func TestAnalyze_404NotFound(t *testing.T) {
 	if report.Pages[0].HTTPStatus != 404 {
 		t.Errorf("HTTPStatus = %d, want 404", report.Pages[0].HTTPStatus)
 	}
-	if report.Pages[0].Status != "404 Not Found" {
-		t.Errorf("Status = %q, want %q", report.Pages[0].Status, "404 Not Found")
+	if report.Pages[0].Status != "error" {
+		t.Errorf("Status = %q, want %q", report.Pages[0].Status, "error")
 	}
 }
 
