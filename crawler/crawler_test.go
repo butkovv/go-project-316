@@ -557,16 +557,23 @@ func TestAnalyze_DepthLimitsTraversal(t *testing.T) {
 			},
 		},
 		{
-			name:  "depth one includes one transition",
+			name:  "depth one includes only root",
 			depth: 1,
+			wantDepth: map[string]int{
+				"http://source.com": 0,
+			},
+		},
+		{
+			name:  "depth two includes one transition",
+			depth: 2,
 			wantDepth: map[string]int{
 				"http://source.com":       0,
 				"http://source.com/child": 1,
 			},
 		},
 		{
-			name:  "depth two includes two transitions",
-			depth: 2,
+			name:  "depth three includes two transitions",
+			depth: 3,
 			wantDepth: map[string]int{
 				"http://source.com":            0,
 				"http://source.com/child":      1,
@@ -636,7 +643,7 @@ func TestAnalyze_ExternalLinksAreNotCrawled(t *testing.T) {
 		"external.com": externalServer.URL,
 	})
 	opts := baseOpts("http://source.com", client)
-	opts.Depth = 1
+	opts.Depth = 2
 
 	result, err := Analyze(context.Background(), opts)
 	if err != nil {
@@ -682,7 +689,7 @@ func TestAnalyze_DuplicateLinksAppearOnce(t *testing.T) {
 
 	client := routedClient(map[string]string{"source.com": server.URL})
 	opts := baseOpts("http://source.com", client)
-	opts.Depth = 1
+	opts.Depth = 2
 
 	result, err := Analyze(context.Background(), opts)
 	if err != nil {
@@ -734,7 +741,7 @@ func TestAnalyze_DuplicateAssetFetchedOnce(t *testing.T) {
 	defer server.Close()
 
 	opts := baseOpts(server.URL, server.Client())
-	opts.Depth = 1
+	opts.Depth = 2
 	opts.Concurrency = 2
 
 	result, err := Analyze(context.Background(), opts)
@@ -891,7 +898,7 @@ func TestAnalyze_DelayLimitsRequestIntervals(t *testing.T) {
 
 	client, transport := recordingRoutedClient(map[string]string{"source.com": server.URL})
 	opts := baseOpts("http://source.com", client)
-	opts.Depth = 1
+	opts.Depth = 2
 	opts.Concurrency = 4
 	opts.Delay = 40 * time.Millisecond
 
@@ -936,7 +943,7 @@ func TestAnalyze_RPSOverridesDelay(t *testing.T) {
 
 	client, transport := recordingRoutedClient(map[string]string{"source.com": server.URL})
 	opts := baseOpts("http://source.com", client)
-	opts.Depth = 1
+	opts.Depth = 2
 	opts.Concurrency = 4
 	opts.Delay = 500 * time.Millisecond
 	opts.RPS = 20
@@ -987,7 +994,7 @@ func TestAnalyze_NoRateLimitDoesNotDelayReport(t *testing.T) {
 
 	client := routedClient(map[string]string{"source.com": server.URL})
 	opts := baseOpts("http://source.com", client)
-	opts.Depth = 1
+	opts.Depth = 2
 	opts.Concurrency = 4
 
 	started := time.Now()

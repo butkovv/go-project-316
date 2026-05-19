@@ -359,7 +359,7 @@ func (c *Crawler) getSEO(bodyBytes []byte) SEO {
 			}
 		}
 
-		if tokenType == html.StartTagToken && (token.Data == "title") {
+		if tokenType == html.StartTagToken && token.Data == "title" && !seo.HasTitle {
 			seo.HasTitle = true
 			if tokenizer.Next() == html.TextToken {
 				seo.Title = cleanText(tokenizer.Token().Data)
@@ -520,6 +520,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if err != nil {
 		return []byte{}, err
 	}
+	maxDepth := max(opts.Depth-1, 0)
 
 	var wg sync.WaitGroup
 
@@ -549,7 +550,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			return
 		}
 
-		page, newLinks, err := c.crawl(ctx, sem, ticker, opts.Depth, link)
+		page, newLinks, err := c.crawl(ctx, sem, ticker, maxDepth, link)
 
 		if err != nil {
 			page = Page{
@@ -567,7 +568,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			return
 		}
 
-		if link.Depth >= opts.Depth {
+		if link.Depth >= maxDepth {
 			return
 		}
 
