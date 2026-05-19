@@ -33,6 +33,34 @@ type Link struct {
 	Depth int
 }
 
+type AssetType string
+
+type Asset struct {
+	URL  string
+	Type AssetType
+}
+
+const (
+	AssetTypeImage  AssetType = "image"
+	AssetTypeScript AssetType = "script"
+	AssetTypeStyle  AssetType = "style"
+	AssetTypeOther  AssetType = "other"
+)
+
+type AssetInfo struct {
+	URL        string    `json:"url"`
+	Type       AssetType `json:"type"`
+	StatusCode int       `json:"status_code"`
+	SizeBytes  int64     `json:"size_bytes"`
+	Error      string    `json:"error"`
+}
+
+type AssetsInfoCache struct {
+	cacheMu  sync.RWMutex
+	data     map[string]AssetInfo
+	keyLocks sync.Map
+}
+
 type SEO struct {
 	HasTitle       bool   `json:"has_title"`
 	Title          string `json:"title"`
@@ -55,6 +83,7 @@ type Page struct {
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 	SEO          SEO          `json:"seo"`
+	AssetsInfo   []AssetInfo  `json:"assets"`
 }
 
 type Report struct {
@@ -65,15 +94,49 @@ type Report struct {
 }
 
 type Crawler struct {
-	visited    map[string]bool
-	httpclient *http.Client
-	mu         sync.Mutex
+	visited         map[string]bool
+	assetsInfoCache *AssetsInfoCache
+	httpclient      *http.Client
+	mu              sync.Mutex
 }
 
 type RetryTransport struct {
 	Next       http.RoundTripper
 	MaxRetries int
 	BaseDelay  time.Duration
+}
+
+func (ac *AssetsInfoCache) getMutex(key string) *sync.Mutex {
+	newMu := &sync.Mutex{}
+	actual, _ := ac.keyLocks.LoadOrStore(key, newMu)
+
+	return actual.(*sync.Mutex)
+}
+
+func (ac *AssetsInfoCache) GetOrFetchAssetInfo(ctx context.Context, sem chan struct{}, ticker *time.Ticker, asset Asset, fetchFunc func(ctx context.Context, sem chan struct{}, ticker *time.Ticker, asset Asset) AssetInfo) AssetInfo {
+	ac.cacheMu.RLock()
+	val, exists := ac.data[asset.URL]
+	ac.cacheMu.RUnlock()
+	if exists {
+		return val
+	}
+
+	keyMu := ac.getMutex(asset.URL)
+	keyMu.Lock()
+	defer keyMu.Unlock()
+
+	ac.cacheMu.RLock()
+	val, exists = ac.data[asset.URL]
+	ac.cacheMu.RUnlock()
+	if exists {
+		return val
+	}
+	data := fetchFunc(ctx, sem, ticker, asset)
+	ac.cacheMu.Lock()
+	ac.data[asset.URL] = data
+	ac.cacheMu.Unlock()
+
+	return data
 }
 
 func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Ticker, maxDepth int, link Link) (Page, []Link, error) {
@@ -115,6 +178,12 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 		if ok {
 			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
+	}
+
+	assets := c.findAssets(doc, []Asset{}, link.URL)
+	for _, asset := range assets {
+		assetInfo := c.assetsInfoCache.GetOrFetchAssetInfo(ctx, sem, ticker, asset, c.fetchAssetInfo)
+		page.AssetsInfo = append(page.AssetsInfo, assetInfo)
 	}
 
 	newLinks := []Link{}
@@ -162,6 +231,54 @@ func (c *Crawler) findLinks(n *html.Node, depth int, links []Link, baseUrl strin
 	}
 
 	return links
+}
+
+func (c *Crawler) findAssets(n *html.Node, assets []Asset, baseUrl string) []Asset {
+	baseParsed, err := url.Parse(baseUrl)
+	if err != nil {
+		return assets
+	}
+	if n.Type == html.ElementNode {
+		var u string
+		var t AssetType
+		switch n.Data {
+		case "link":
+			rel := getAttr(n, "rel")
+			if rel == "stylesheet" {
+				u = getAttr(n, "href")
+				t = AssetTypeStyle
+			}
+		case "script":
+			u = getAttr(n, "src")
+			t = AssetTypeScript
+		case "img":
+			u = getAttr(n, "src")
+			t = AssetTypeImage
+		}
+		u = strings.TrimSpace(u)
+		if u != "" {
+			parsed, err := url.Parse(u)
+			if err != nil {
+				return assets
+			}
+			if parsed.Scheme == "" && parsed.Host == "" && parsed.Path == "" {
+				return assets
+			}
+			asset := Asset{Type: t}
+			if !parsed.IsAbs() {
+				asset.URL = baseParsed.ResolveReference(parsed).String()
+			} else {
+				asset.URL = u
+			}
+			assets = append(assets, asset)
+		}
+	}
+
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		assets = c.findAssets(child, assets, baseUrl)
+	}
+
+	return assets
 }
 
 func (c *Crawler) markVisited(URL string) bool {
@@ -246,6 +363,59 @@ func (c *Crawler) getSEO(bodyBytes []byte) SEO {
 	return seo
 }
 
+func (c *Crawler) fetchAssetInfo(ctx context.Context, sem chan struct{}, ticker *time.Ticker, asset Asset) AssetInfo {
+	assetInfo := AssetInfo{
+		URL:  asset.URL,
+		Type: asset.Type,
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, asset.URL, nil)
+	if err != nil {
+		assetInfo.Error = err.Error()
+		return assetInfo
+	}
+
+	response, err := c.doRequest(ctx, sem, ticker, req)
+	if err != nil {
+		assetInfo.Error = err.Error()
+		return assetInfo
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	contentLength := response.Header.Get("Content-Length")
+	if contentLength == "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
+		if err != nil {
+			assetInfo.Error = err.Error()
+			return assetInfo
+		}
+
+		response, err := c.doRequest(ctx, sem, ticker, req)
+		if err != nil {
+			assetInfo.Error = err.Error()
+			return assetInfo
+		}
+		defer func() { _ = response.Body.Close() }()
+		assetInfo.StatusCode = response.StatusCode
+		if response.StatusCode >= 400 {
+			assetInfo.Error = response.Status
+		}
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			assetInfo.SizeBytes = 0
+			assetInfo.Error = err.Error()
+		} else {
+			assetInfo.SizeBytes = int64(len(body))
+		}
+	} else {
+		assetInfo.StatusCode = response.StatusCode
+		if response.StatusCode >= 400 {
+			assetInfo.Error = response.Status
+		}
+		assetInfo.SizeBytes = response.ContentLength
+	}
+	return assetInfo
+}
+
 func getDomain(rawUrl string) (string, error) {
 	u, err := url.Parse(rawUrl)
 	if err != nil {
@@ -274,6 +444,15 @@ func release(sem chan struct{}) {
 
 func cleanText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func getAttr(n *html.Node, key string) string {
+	for _, attr := range n.Attr {
+		if attr.Key == key {
+			return attr.Val
+		}
+	}
+	return ""
 }
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
@@ -313,6 +492,9 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	c := &Crawler{
 		httpclient: &hc,
 		visited:    make(map[string]bool),
+		assetsInfoCache: &AssetsInfoCache{
+			data: make(map[string]AssetInfo),
+		},
 	}
 
 	var crawl func(link Link)
