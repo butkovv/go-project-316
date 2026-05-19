@@ -71,6 +71,7 @@ func main() {
 				Depth:       cmd.Int("depth"),
 				Retries:     cmd.Int("retries"),
 				Delay:       cmd.Duration("delay"),
+				Timeout:     cmd.Duration("timeout"),
 				RPS:         cmd.Int("rps"),
 				UserAgent:   cmd.String("user-agent"),
 				Concurrency: cmd.Int("workers"),

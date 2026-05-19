@@ -115,8 +115,8 @@ func normalizeReportJSON(t *testing.T, data []byte) []byte {
 		for j := range report.Pages[i].BrokenLinks {
 			report.Pages[i].BrokenLinks[j].URL = "https://example.com/missing"
 		}
-		for j := range report.Pages[i].AssetsInfo {
-			report.Pages[i].AssetsInfo[j].URL = "https://example.com/static/logo.png"
+		for j := range report.Pages[i].Assets {
+			report.Pages[i].Assets[j].URL = "https://example.com/static/logo.png"
 		}
 	}
 
@@ -554,7 +554,7 @@ func TestAnalyze_DepthLimitsTraversal(t *testing.T) {
 			name:  "depth one includes one transition",
 			depth: 1,
 			wantDepth: map[string]int{
-				"http://source.com":        0,
+				"http://source.com":       0,
 				"http://source.com/child": 1,
 			},
 		},
@@ -562,7 +562,7 @@ func TestAnalyze_DepthLimitsTraversal(t *testing.T) {
 			name:  "depth two includes two transitions",
 			depth: 2,
 			wantDepth: map[string]int{
-				"http://source.com":             0,
+				"http://source.com":            0,
 				"http://source.com/child":      1,
 				"http://source.com/grandchild": 2,
 			},
@@ -643,7 +643,7 @@ func TestAnalyze_ExternalLinksAreNotCrawled(t *testing.T) {
 	}
 
 	wantPages := map[string]bool{
-		"http://source.com":         true,
+		"http://source.com":        true,
 		"http://source.com/first":  true,
 		"http://source.com/second": true,
 	}
@@ -750,14 +750,14 @@ func TestAnalyze_DuplicateAssetFetchedOnce(t *testing.T) {
 	}
 	root := pages[server.URL]
 	child := pages[server.URL+"/child"]
-	if len(root.AssetsInfo) != 1 {
-		t.Fatalf("root assets length = %d, want 1", len(root.AssetsInfo))
+	if len(root.Assets) != 1 {
+		t.Fatalf("root assets length = %d, want 1", len(root.Assets))
 	}
-	if len(child.AssetsInfo) != 1 {
-		t.Fatalf("child assets length = %d, want 1", len(child.AssetsInfo))
+	if len(child.Assets) != 1 {
+		t.Fatalf("child assets length = %d, want 1", len(child.Assets))
 	}
-	if root.AssetsInfo[0] != child.AssetsInfo[0] {
-		t.Fatalf("cached asset info differs: root=%+v child=%+v", root.AssetsInfo[0], child.AssetsInfo[0])
+	if root.Assets[0] != child.Assets[0] {
+		t.Fatalf("cached asset info differs: root=%+v child=%+v", root.Assets[0], child.Assets[0])
 	}
 
 	mu.Lock()
@@ -800,7 +800,7 @@ func TestAnalyze_AssetSizeFromBodyWithoutContentLength(t *testing.T) {
 	if len(report.Pages) != 1 {
 		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
 	}
-	assets := report.Pages[0].AssetsInfo
+	assets := report.Pages[0].Assets
 	if len(assets) != 1 {
 		t.Fatalf("Assets length = %d, want 1", len(assets))
 	}
@@ -839,7 +839,7 @@ func TestAnalyze_AssetHTTPErrorReported(t *testing.T) {
 	if len(report.Pages) != 1 {
 		t.Fatalf("Pages length = %d, want 1", len(report.Pages))
 	}
-	assets := report.Pages[0].AssetsInfo
+	assets := report.Pages[0].Assets
 	if len(assets) != 1 {
 		t.Fatalf("Assets length = %d, want 1", len(assets))
 	}

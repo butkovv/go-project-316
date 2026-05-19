@@ -21,6 +21,7 @@ type Options struct {
 	Depth       int
 	Retries     int
 	Delay       time.Duration
+	Timeout     time.Duration
 	RPS         int
 	UserAgent   string
 	Concurrency int
@@ -35,7 +36,7 @@ type Link struct {
 
 type AssetType string
 
-type Asset struct {
+type AssetLink struct {
 	URL  string
 	Type AssetType
 }
@@ -47,7 +48,7 @@ const (
 	AssetTypeOther  AssetType = "other"
 )
 
-type AssetInfo struct {
+type Asset struct {
 	URL        string    `json:"url"`
 	Type       AssetType `json:"type"`
 	StatusCode int       `json:"status_code"`
@@ -55,9 +56,9 @@ type AssetInfo struct {
 	Error      string    `json:"error"`
 }
 
-type AssetsInfoCache struct {
+type AssetsCache struct {
 	cacheMu  sync.RWMutex
-	data     map[string]AssetInfo
+	data     map[string]Asset
 	keyLocks sync.Map
 }
 
@@ -83,7 +84,7 @@ type Page struct {
 	Error        string       `json:"error"`
 	SEO          SEO          `json:"seo"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
-	AssetsInfo   []AssetInfo  `json:"assets"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -95,10 +96,10 @@ type Report struct {
 }
 
 type Crawler struct {
-	visited         map[string]bool
-	assetsInfoCache *AssetsInfoCache
-	httpclient      *http.Client
-	mu              sync.Mutex
+	visited     map[string]bool
+	assetsCache *AssetsCache
+	httpclient  *http.Client
+	mu          sync.Mutex
 }
 
 type RetryTransport struct {
@@ -107,34 +108,34 @@ type RetryTransport struct {
 	BaseDelay  time.Duration
 }
 
-func (ac *AssetsInfoCache) getMutex(key string) *sync.Mutex {
+func (ac *AssetsCache) getMutex(key string) *sync.Mutex {
 	newMu := &sync.Mutex{}
 	actual, _ := ac.keyLocks.LoadOrStore(key, newMu)
 
 	return actual.(*sync.Mutex)
 }
 
-func (ac *AssetsInfoCache) GetOrFetchAssetInfo(ctx context.Context, sem chan struct{}, ticker *time.Ticker, asset Asset, fetchFunc func(ctx context.Context, sem chan struct{}, ticker *time.Ticker, asset Asset) AssetInfo) AssetInfo {
+func (ac *AssetsCache) GetOrFetchAsset(ctx context.Context, sem chan struct{}, ticker *time.Ticker, assetLink AssetLink, fetchFunc func(ctx context.Context, sem chan struct{}, ticker *time.Ticker, assetLink AssetLink) Asset) Asset {
 	ac.cacheMu.RLock()
-	val, exists := ac.data[asset.URL]
+	val, exists := ac.data[assetLink.URL]
 	ac.cacheMu.RUnlock()
 	if exists {
 		return val
 	}
 
-	keyMu := ac.getMutex(asset.URL)
+	keyMu := ac.getMutex(assetLink.URL)
 	keyMu.Lock()
 	defer keyMu.Unlock()
 
 	ac.cacheMu.RLock()
-	val, exists = ac.data[asset.URL]
+	val, exists = ac.data[assetLink.URL]
 	ac.cacheMu.RUnlock()
 	if exists {
 		return val
 	}
-	data := fetchFunc(ctx, sem, ticker, asset)
+	data := fetchFunc(ctx, sem, ticker, assetLink)
 	ac.cacheMu.Lock()
-	ac.data[asset.URL] = data
+	ac.data[assetLink.URL] = data
 	ac.cacheMu.Unlock()
 
 	return data
@@ -165,7 +166,7 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 		Status:       pageStatus(response.StatusCode),
 		SEO:          seo,
 		BrokenLinks:  []BrokenLink{},
-		AssetsInfo:   []AssetInfo{},
+		Assets:       []Asset{},
 		DiscoveredAt: time.Now(),
 	}
 
@@ -183,10 +184,10 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 		}
 	}
 
-	assets := c.findAssets(doc, []Asset{}, link.URL)
-	for _, asset := range assets {
-		assetInfo := c.assetsInfoCache.GetOrFetchAssetInfo(ctx, sem, ticker, asset, c.fetchAssetInfo)
-		page.AssetsInfo = append(page.AssetsInfo, assetInfo)
+	assetLinks := c.findAssetLinks(doc, []AssetLink{}, link.URL)
+	for _, assetLink := range assetLinks {
+		asset := c.assetsCache.GetOrFetchAsset(ctx, sem, ticker, assetLink, c.fetchAsset)
+		page.Assets = append(page.Assets, asset)
 	}
 
 	newLinks := []Link{}
@@ -236,10 +237,10 @@ func (c *Crawler) findLinks(n *html.Node, depth int, links []Link, baseUrl strin
 	return links
 }
 
-func (c *Crawler) findAssets(n *html.Node, assets []Asset, baseUrl string) []Asset {
+func (c *Crawler) findAssetLinks(n *html.Node, assetLinks []AssetLink, baseUrl string) []AssetLink {
 	baseParsed, err := url.Parse(baseUrl)
 	if err != nil {
-		return assets
+		return assetLinks
 	}
 	if n.Type == html.ElementNode {
 		var u string
@@ -262,26 +263,26 @@ func (c *Crawler) findAssets(n *html.Node, assets []Asset, baseUrl string) []Ass
 		if u != "" {
 			parsed, err := url.Parse(u)
 			if err != nil {
-				return assets
+				return assetLinks
 			}
 			if parsed.Scheme == "" && parsed.Host == "" && parsed.Path == "" {
-				return assets
+				return assetLinks
 			}
-			asset := Asset{Type: t}
+			assetLink := AssetLink{Type: t}
 			if !parsed.IsAbs() {
-				asset.URL = baseParsed.ResolveReference(parsed).String()
+				assetLink.URL = baseParsed.ResolveReference(parsed).String()
 			} else {
-				asset.URL = u
+				assetLink.URL = u
 			}
-			assets = append(assets, asset)
+			assetLinks = append(assetLinks, assetLink)
 		}
 	}
 
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		assets = c.findAssets(child, assets, baseUrl)
+		assetLinks = c.findAssetLinks(child, assetLinks, baseUrl)
 	}
 
-	return assets
+	return assetLinks
 }
 
 func (c *Crawler) markVisited(URL string) bool {
@@ -366,21 +367,21 @@ func (c *Crawler) getSEO(bodyBytes []byte) SEO {
 	return seo
 }
 
-func (c *Crawler) fetchAssetInfo(ctx context.Context, sem chan struct{}, ticker *time.Ticker, asset Asset) AssetInfo {
-	assetInfo := AssetInfo{
-		URL:  asset.URL,
-		Type: asset.Type,
+func (c *Crawler) fetchAsset(ctx context.Context, sem chan struct{}, ticker *time.Ticker, assetLink AssetLink) Asset {
+	asset := Asset{
+		URL:  assetLink.URL,
+		Type: assetLink.Type,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, asset.URL, nil)
 	if err != nil {
-		assetInfo.Error = err.Error()
-		return assetInfo
+		asset.Error = err.Error()
+		return asset
 	}
 
 	response, err := c.doRequest(ctx, sem, ticker, req)
 	if err != nil {
-		assetInfo.Error = err.Error()
-		return assetInfo
+		asset.Error = err.Error()
+		return asset
 	}
 	defer func() { _ = response.Body.Close() }()
 
@@ -388,35 +389,35 @@ func (c *Crawler) fetchAssetInfo(ctx context.Context, sem chan struct{}, ticker 
 	if contentLength == "" {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
 		if err != nil {
-			assetInfo.Error = err.Error()
-			return assetInfo
+			asset.Error = err.Error()
+			return asset
 		}
 
 		response, err := c.doRequest(ctx, sem, ticker, req)
 		if err != nil {
-			assetInfo.Error = err.Error()
-			return assetInfo
+			asset.Error = err.Error()
+			return asset
 		}
 		defer func() { _ = response.Body.Close() }()
-		assetInfo.StatusCode = response.StatusCode
+		asset.StatusCode = response.StatusCode
 		if response.StatusCode >= 400 {
-			assetInfo.Error = response.Status
+			asset.Error = response.Status
 		}
 		body, err := io.ReadAll(response.Body)
 		if err != nil {
-			assetInfo.SizeBytes = 0
-			assetInfo.Error = err.Error()
+			asset.SizeBytes = 0
+			asset.Error = err.Error()
 		} else {
-			assetInfo.SizeBytes = int64(len(body))
+			asset.SizeBytes = int64(len(body))
 		}
 	} else {
-		assetInfo.StatusCode = response.StatusCode
+		asset.StatusCode = response.StatusCode
 		if response.StatusCode >= 400 {
-			assetInfo.Error = response.Status
+			asset.Error = response.Status
 		}
-		assetInfo.SizeBytes = response.ContentLength
+		asset.SizeBytes = response.ContentLength
 	}
-	return assetInfo
+	return asset
 }
 
 func getDomain(rawUrl string) (string, error) {
@@ -502,8 +503,8 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	c := &Crawler{
 		httpclient: &hc,
 		visited:    make(map[string]bool),
-		assetsInfoCache: &AssetsInfoCache{
-			data: make(map[string]AssetInfo),
+		assetsCache: &AssetsCache{
+			data: make(map[string]Asset),
 		},
 	}
 
