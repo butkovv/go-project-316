@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -48,16 +47,15 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 		return Page{}, nil, err
 	}
 
-	foundLinks := c.findLinks(doc, link.Depth+1, nil, link.URL)
+	pageLinks, assetLinks := c.collectLinksAndAssets(doc, link.Depth+1, link.URL)
 
-	for _, l := range foundLinks {
+	for _, l := range pageLinks {
 		brokenLink, ok := c.checkBrokenLink(ctx, sem, ticker, l)
 		if ok {
 			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
 	}
 
-	assetLinks := c.findAssetLinks(doc, []AssetLink{}, link.URL)
 	sort.SliceStable(assetLinks, func(i, j int) bool {
 		return assetTypeRank(assetLinks[i].Type) < assetTypeRank(assetLinks[j].Type)
 	})
@@ -68,49 +66,55 @@ func (c *Crawler) crawl(ctx context.Context, sem chan struct{}, ticker *time.Tic
 
 	newLinks := []Link{}
 	if link.Depth < maxDepth {
-		newLinks = foundLinks
+		newLinks = pageLinks
 	}
 	return page, newLinks, nil
 }
 
-func (c *Crawler) findLinks(n *html.Node, depth int, links []Link, baseUrl string) []Link {
-	baseParsed, err := url.Parse(baseUrl)
-	if err != nil {
-		return links
-	}
+func (c *Crawler) collectLinksAndAssets(n *html.Node, depth int, baseUrl string) ([]Link, []AssetLink) {
+	links := []Link{}
+	assetLinks := []AssetLink{}
 
-	if n.Type == html.ElementNode && n.Data == "a" {
-		for _, a := range n.Attr {
-			if a.Key != "href" {
-				continue
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode {
+			switch node.Data {
+			case "a":
+				if href := strings.TrimSpace(getAttr(node, "href")); href != "" {
+					if resolved, ok := resolveURL(baseUrl, href); ok {
+						links = append(links, Link{URL: canonicalURL(resolved), Depth: depth})
+					}
+				}
+			case "img":
+				if src := strings.TrimSpace(getAttr(node, "src")); src != "" {
+					if resolved, ok := resolveURL(baseUrl, src); ok {
+						assetLinks = append(assetLinks, AssetLink{URL: resolved, Type: AssetTypeImage})
+					}
+				}
+			case "script":
+				if src := strings.TrimSpace(getAttr(node, "src")); src != "" {
+					if resolved, ok := resolveURL(baseUrl, src); ok {
+						assetLinks = append(assetLinks, AssetLink{URL: resolved, Type: AssetTypeScript})
+					}
+				}
+			case "link":
+				if getAttr(node, "rel") == "stylesheet" {
+					if href := strings.TrimSpace(getAttr(node, "href")); href != "" {
+						if resolved, ok := resolveURL(baseUrl, href); ok {
+							assetLinks = append(assetLinks, AssetLink{URL: resolved, Type: AssetTypeStyle})
+						}
+					}
+				}
 			}
-			if strings.TrimSpace(a.Val) == "" {
-				continue
-			}
-			u, err := url.Parse(a.Val)
-			if err != nil {
-				continue
-			}
-			if u.Scheme == "" && u.Host == "" && u.Path == "" {
-				continue
-			}
+		}
 
-			link := Link{Depth: depth}
-
-			if !u.IsAbs() {
-				link.URL = canonicalURL(baseParsed.ResolveReference(u).String())
-			} else {
-				link.URL = canonicalURL(a.Val)
-			}
-			links = append(links, link)
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
 		}
 	}
 
-	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		links = c.findLinks(child, depth, links, baseUrl)
-	}
-
-	return links
+	walk(n)
+	return links, assetLinks
 }
 
 func (c *Crawler) markVisited(URL string) bool {
@@ -207,54 +211,6 @@ func (ac *AssetsCache) GetOrFetchAsset(ctx context.Context, sem chan struct{}, t
 	ac.cacheMu.Unlock()
 
 	return data
-}
-
-func (c *Crawler) findAssetLinks(n *html.Node, assetLinks []AssetLink, baseUrl string) []AssetLink {
-	baseParsed, err := url.Parse(baseUrl)
-	if err != nil {
-		return assetLinks
-	}
-	if n.Type == html.ElementNode {
-		var u string
-		var t AssetType
-		switch n.Data {
-		case "link":
-			rel := getAttr(n, "rel")
-			if rel == "stylesheet" {
-				u = getAttr(n, "href")
-				t = AssetTypeStyle
-			}
-		case "script":
-			u = getAttr(n, "src")
-			t = AssetTypeScript
-		case "img":
-			u = getAttr(n, "src")
-			t = AssetTypeImage
-		}
-		u = strings.TrimSpace(u)
-		if u != "" {
-			parsed, err := url.Parse(u)
-			if err != nil {
-				return assetLinks
-			}
-			if parsed.Scheme == "" && parsed.Host == "" && parsed.Path == "" {
-				return assetLinks
-			}
-			assetLink := AssetLink{Type: t}
-			if !parsed.IsAbs() {
-				assetLink.URL = baseParsed.ResolveReference(parsed).String()
-			} else {
-				assetLink.URL = u
-			}
-			assetLinks = append(assetLinks, assetLink)
-		}
-	}
-
-	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		assetLinks = c.findAssetLinks(child, assetLinks, baseUrl)
-	}
-
-	return assetLinks
 }
 
 func (c *Crawler) fetchAsset(ctx context.Context, sem chan struct{}, ticker *time.Ticker, assetLink AssetLink) Asset {

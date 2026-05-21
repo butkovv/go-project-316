@@ -71,6 +71,25 @@ func canonicalURL(rawURL string) string {
 	return u.String()
 }
 
+func resolveURL(baseURL, rawURL string) (string, bool) {
+	baseParsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", false
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	if parsed.Scheme == "" && parsed.Host == "" && parsed.Path == "" {
+		return "", false
+	}
+	if !parsed.IsAbs() {
+		return baseParsed.ResolveReference(parsed).String(), true
+	}
+	return rawURL, true
+}
+
 func (c *Crawler) doRequest(ctx context.Context, sem chan struct{}, ticker *time.Ticker, req *http.Request) (*http.Response, error) {
 	if ticker != nil {
 		select {
